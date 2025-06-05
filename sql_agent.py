@@ -1,14 +1,13 @@
 # %%
-from models import OPENAI_MODEL, InvalidRequest, SQLResponse, ChartResponses
+from models import OPENAI_MODEL
 from sql_operations import list_tables, describe_table, run_sql_query
-from annotated_types import MinLen
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import create_engine
 from langchain_community.utilities.sql_database import SQLDatabase
 
-from typing_extensions import Any, TypedDict, Optional, Annotated, Sequence
+from typing_extensions import Any, TypedDict, Optional, Annotated
 from pydantic import BaseModel, Field
-from langchain_core.messages import BaseMessage, ToolMessage
+from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableLambda, RunnableWithFallbacks
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import START, StateGraph, END
@@ -151,6 +150,7 @@ from langgraph.graph.message import AnyMessage, add_messages
 # Define the state for the agent
 class State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
+    sql_query: Optional[str]
 
 # %%
 # Define a new graph
@@ -175,11 +175,18 @@ def first_tool_call(state: State) -> dict[str, list[AIMessage]]:
     }
 
 # %%
-def model_check_query(state: State) -> dict[str, list[AIMessage]]:
+def model_check_query(state: State) -> dict[str, Any]:
     """
     Use this tool to double-check if your query is correct before executing it.
     """
-    return {"messages": [query_check.invoke({"messages": [state["messages"][-1]]})]}
+    message = query_check.invoke({"messages": [state["messages"][-1]]})
+    sql_query = None
+    if message.tool_calls:
+        for tc in message.tool_calls:
+            if tc["name"] == "run_sql_query_tool" and "query" in tc["args"]:
+                sql_query = tc["args"]["query"]
+                break
+    return {"messages": [message], "sql_query": sql_query}
 
 # %%
 workflow.add_node("first_tool_call", first_tool_call)
@@ -205,6 +212,7 @@ class SubmitFinalAnswer(BaseModel):
     """Submit the final answer to the user based on the query results."""
 
     final_answer: str = Field(..., description="The final answer to the user")
+    sql_query: Optional[str] = Field(None, description="The SQL query that was executed to get the answer")
 
 
 # Add a node for a model to generate a query based on the question and schema
@@ -227,7 +235,7 @@ query_gen_system = """You are a SQL expert with a strong attention to detail.
     If you get an empty result set, you should try to rewrite the query to get a non-empty result set.
     NEVER make stuff up if you don't have enough information to answer the query... just say you don't have enough information.
 
-    Once you have the query results, use them to construct a clear, concise, and human-readable answer to the original question. Then, invoke the SubmitFinalAnswer tool with this human-readable answer.
+    Once you have the query results, use them to construct a clear, concise, and human-readable answer to the original question. Then, invoke the SubmitFinalAnswer tool. The 'final_answer' argument of this tool should be the human-readable answer you constructed. The 'sql_query' argument should be the SQL query that was executed.
 
     DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database."""
 query_gen_prompt = ChatPromptTemplate.from_messages(
@@ -246,7 +254,11 @@ def query_gen_node(state: State):
     tool_messages = []
     if message.tool_calls:
         for tc in message.tool_calls:
-            if tc["name"] != "SubmitFinalAnswer":
+            if tc["name"] == "SubmitFinalAnswer":
+                # Add the stored SQL query to the arguments of SubmitFinalAnswer
+                if state.get("sql_query"):
+                    tc["args"]["sql_query"] = state["sql_query"]
+            else:
                 tool_messages.append(
                     ToolMessage(
                         content=f"Error: The wrong tool was called: {tc['name']}. Please fix your mistakes. Remember to only call SubmitFinalAnswer to submit the final answer. Generated queries should be outputted WITHOUT a tool call.",
@@ -316,15 +328,12 @@ display(
 
 # %%
 messages = app.invoke(
-    {"messages": [("user", "Total number of artists in the db")]}
+    {"messages": [("user", "Total number of albums for each artist with pop genre")]}
 )
 json_str = messages["messages"][-1].tool_calls[0]["args"]["final_answer"]
 
 # %%
-messages["messages"]
-
-# %%
-json_str
+messages["messages"][-1].tool_calls[0]["args"]
 
 # %%
 for event in app.stream(
