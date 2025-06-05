@@ -279,12 +279,12 @@ workflow.add_node("execute_query", create_tool_node_with_fallback([run_sql_query
 
 # %%
 # Define a conditional edge to decide whether to continue or end the workflow
-def should_continue(state: State) -> Literal[END, "correct_query", "query_gen"]:
+def should_continue(state: State) -> Literal["end", "correct_query", "query_gen"]:
     messages = state["messages"]
     last_message = messages[-1]
     # If there is a tool call, then we finish
     if getattr(last_message, "tool_calls", None):
-        return END
+        return "end"
     if last_message.content.startswith("Error:"):
         return "query_gen"
     else:
@@ -300,6 +300,7 @@ workflow.add_edge("describe_table_tool", "query_gen")
 workflow.add_conditional_edges(
     "query_gen",
     should_continue,
+    { "correct_query": "correct_query", "query_gen": "query_gen", "end": END}
 )
 workflow.add_edge("correct_query", "execute_query")
 workflow.add_edge("execute_query", "query_gen")
