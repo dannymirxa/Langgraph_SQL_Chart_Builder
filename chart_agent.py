@@ -236,13 +236,18 @@ def execute_code_node(state: State):
 
 # %%
 workflow.add_node("generate_dataframe_tool_call", create_dataframe_call)
+workflow.add_node("execute_dataframe_tool", create_tool_node_with_fallback([create_dataframe_pd_json_tool]))
 workflow.add_node("code_gen", code_gen_node)
 workflow.add_node("execute_code", execute_code_node)
 workflow.add_conditional_edges(
     "code_gen",
-    should_continue
+    should_continue,
+    {
+        "correct_code": "execute_code",
+        "code_gen": "code_gen"
+    }
 )
-workflow.add_node("execute_dataframe_tool", create_tool_node_with_fallback([create_dataframe_pd_json_tool]))
+
 workflow.add_edge("generate_dataframe_tool_call", "execute_dataframe_tool")
 workflow.add_edge("execute_dataframe_tool", "code_gen")
 workflow.add_edge("execute_code", END)
@@ -277,7 +282,7 @@ messages["messages"][-1].content
 code_blocks = re.findall(r"```python\n(.*?)```", messages["messages"][-1].content, re.DOTALL)
 full_code = "\n".join(code_blocks)
 full_code = dedent(full_code)
-# print(full_code)
+print(full_code)
 
 # %%
 
