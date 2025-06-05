@@ -12,6 +12,23 @@ from langchain_core.runnables import RunnableLambda, RunnableWithFallbacks
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import START, StateGraph, END
 
+from typing import Annotated, Literal
+
+from langchain_core.messages import AIMessage
+from pydantic import BaseModel, Field
+from langchain_openai import ChatOpenAI
+from typing_extensions import TypedDict
+
+from langgraph.graph import END, StateGraph, START
+from langgraph.graph.message import AnyMessage, add_messages
+
+
+# Define the state for the agent
+class State(TypedDict):
+    messages: Annotated[list[AnyMessage], add_messages]
+    sql_query: Optional[str]
+
+
 # %%
 engine = create_engine('postgresql+psycopg2://chinook:chinook@localhost:5433/chinook_auto_increment')
 
@@ -110,6 +127,7 @@ run_sql_query(engine, 'SELECT COUNT(artist_id) AS total_artists FROM artist;')
 # %%
 from langchain_core.prompts import ChatPromptTemplate
 
+## Create query checker function
 query_check_system = """You are a SQL expert with a strong attention to detail.
             Double check the Postgres query for common mistakes, including:
             - Using NOT IN with NULL values
@@ -128,29 +146,23 @@ query_check_system = """You are a SQL expert with a strong attention to detail.
 query_check_prompt = ChatPromptTemplate.from_messages(
   [("system", query_check_system), ("placeholder", "{messages}")]
 )
-query_check = query_check_prompt | OPENAI_MODEL.bind_tools(
+query_check = query_check_prompt.pipe(OPENAI_MODEL.bind_tools(
   [run_sql_query_tool], tool_choice="required"
-)
-
-# %% [markdown]
-# ### Defining the Workflow
+))
 
 # %%
-from typing import Annotated, Literal
-
-from langchain_core.messages import AIMessage
-from pydantic import BaseModel, Field
-from langchain_openai import ChatOpenAI
-from typing_extensions import TypedDict
-
-from langgraph.graph import END, StateGraph, START
-from langgraph.graph.message import AnyMessage, add_messages
-
-
-# Define the state for the agent
-class State(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    sql_query: Optional[str]
+def model_check_query(state: State) -> dict[str, Any]:
+    """
+    Use this tool to double-check if your query is correct before executing it.
+    """
+    message = query_check.invoke({"messages": [state["messages"][-1]]})
+    sql_query = None
+    if message.tool_calls:
+        for tc in message.tool_calls:
+            if tc["name"] == "run_sql_query_tool" and "query" in tc["args"]:
+                sql_query = tc["args"]["query"]
+                break
+    return {"messages": [message], "sql_query": sql_query}
 
 # %%
 # Define a new graph
@@ -158,6 +170,7 @@ workflow = StateGraph(State)
 
 # %%
 # Add a node for the first tool call
+# retun messages because it is an object in the state
 def first_tool_call(state: State) -> dict[str, list[AIMessage]]:
     return {
         "messages": [
@@ -174,19 +187,7 @@ def first_tool_call(state: State) -> dict[str, list[AIMessage]]:
         ]
     }
 
-# %%
-def model_check_query(state: State) -> dict[str, Any]:
-    """
-    Use this tool to double-check if your query is correct before executing it.
-    """
-    message = query_check.invoke({"messages": [state["messages"][-1]]})
-    sql_query = None
-    if message.tool_calls:
-        for tc in message.tool_calls:
-            if tc["name"] == "run_sql_query_tool" and "query" in tc["args"]:
-                sql_query = tc["args"]["query"]
-                break
-    return {"messages": [message], "sql_query": sql_query}
+
 
 # %%
 workflow.add_node("first_tool_call", first_tool_call)
@@ -241,9 +242,9 @@ query_gen_system = """You are a SQL expert with a strong attention to detail.
 query_gen_prompt = ChatPromptTemplate.from_messages(
     [("system", query_gen_system), ("placeholder", "{messages}")]
 )
-query_gen = query_gen_prompt | OPENAI_MODEL.bind_tools(
+query_gen = query_gen_prompt.pipe(OPENAI_MODEL.bind_tools(
     [SubmitFinalAnswer]
-)
+))
 
 
 # %%
