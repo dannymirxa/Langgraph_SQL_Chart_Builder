@@ -18,7 +18,7 @@ OPENAI_MODEL = AzureChatOpenAI(
     max_tokens=None,
     timeout=None,
     max_retries=2,
-    api_key=os.getenv("AZURE_OPENAI_KEY"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     azure_endpoint="https://llmcoechangemateopenai2.openai.azure.com/",
 )
 
