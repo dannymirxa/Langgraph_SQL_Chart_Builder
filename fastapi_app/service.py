@@ -1,9 +1,9 @@
-from fallback_tool import create_tool_node_with_fallback
-from models import State, OPENAI_MODEL, Request, Response
-from dataframe import create_dataframe_pd_json
+from fastapi_app.fallback_tool import create_tool_node_with_fallback
+from fastapi_app.models import State, OPENAI_MODEL, Request, Response
+from fastapi_app.dataframe import create_dataframe_pd_json
+from fastapi_app.sql_operations import list_tables, describe_table, run_sql_query
 
 from sqlalchemy import create_engine
-from sql_operations import list_tables, describe_table, run_sql_query
 
 from typing_extensions import Any, TypedDict, Optional, Annotated, Literal
 from pydantic import BaseModel, Field
@@ -389,7 +389,7 @@ async def main(request: Request) -> Response:
     return Response(
         messages=result["messages"],
         sql_query=result.get("sql_query"),
-        dataframe=result.get("dataframe"),
+        dataframe=result.get("dataframe").to_json() if result.get("dataframe") is not None else None,
         code_generated=result.get("code_generated")
     )
 
@@ -432,6 +432,6 @@ async def main(request: Request) -> Response:
 
 # import asyncio
 
-# if __name__=="__main__":
-#     request = Request(query="Total number of albums for each artist with pop genre")
-#     response = asyncio.run(main(request))
+# # if __name__=="__main__":
+# request = {"query":"Total number of albums for each artist with pop genre"}
+# response = asyncio.run(main(request))

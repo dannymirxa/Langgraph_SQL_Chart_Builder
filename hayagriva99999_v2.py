@@ -1,8 +1,8 @@
 # %%
-from models import OPENAI_MODEL
+from model import OPENAI_MODEL
 from sqlalchemy import create_engine
 from langchain_community.utilities import SQLDatabase
-from sql_operations import list_tables, describe_table, run_sql_query
+from fastapi_app.sql_operations import list_tables, describe_table, run_sql_query
 
 # db = SQLDatabase.from_uri("sqlite:///Chinook.db")
 

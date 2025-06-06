@@ -1,6 +1,6 @@
 # %%
-from models import OPENAI_MODEL
-from app.sql_operations import list_tables, describe_table, run_sql_query
+from model import OPENAI_MODEL
+from fastapi_app.sql_operations import list_tables, describe_table, run_sql_query
 
 from sqlalchemy import create_engine
 from langchain_community.utilities.sql_database import SQLDatabase

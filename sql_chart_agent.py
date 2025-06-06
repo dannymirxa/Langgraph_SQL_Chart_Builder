@@ -1,7 +1,7 @@
 # %%
-from models import OPENAI_MODEL
-from app.sql_operations import list_tables, describe_table, run_sql_query
-from app.dataframe import create_dataframe_pd_json
+from model import OPENAI_MODEL
+from fastapi_app.sql_operations import list_tables, describe_table, run_sql_query
+from fastapi_app.dataframe import create_dataframe_pd_json
 
 import pandas as pd
 import plotly.express as px

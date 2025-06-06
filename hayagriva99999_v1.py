@@ -1,5 +1,5 @@
 # %%
-from models import OPENAI_MODEL
+from model import OPENAI_MODEL
 from sqlalchemy import create_engine
 from langchain_community.utilities import SQLDatabase
 
