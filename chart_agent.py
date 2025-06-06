@@ -122,41 +122,6 @@ class CodeGenerated(BaseModel):
 chartOptions = ('Scatter', 'Line', 'Histograph', 'Bargraph', 'Pie Chart')
 
 # %%
-# Add a node for a model to generate a query based on the question and schema
-query_gen_system_template = """
-    system: You are an AI assistant specialized in creating insightful graphs and generating Python code for them.
-    The data is already available in a pandas DataFrame named `df`.
-    DataFrame columns: {df_columns}
-    Sample of DataFrame (first 5 rows):
-    {df_head}
-
-    Your task:
-    1.  Analyze the user's request and the provided DataFrame.
-    2.  **Adhere to Chart Type Request:**
-        a.  The user's instruction (provided as `user_input` to this agent) may specify a preferred chart type (e.g., "generate a scatter plot", "show a bar graph").
-        b.  If a specific chart type is requested by the user and it is available in {chart_options} (e.g., 'Scatter', 'Line', 'Bar', etc.) and is appropriate for the data, **you MUST generate the Python code for that specific chart type.**
-        c.  If the user does not specify a chart type, or if the specified type is not in {chart_options} or is clearly unsuitable for the data, then you may choose the most fitting chart type from {chart_options}. In such cases, briefly explain your choice of chart type in the 'insights'.
-    3.  Generate valuable insights based on the data and the chosen chart.
-    4.  Produce concise and correct Python code (using `plotly.express`) to plot the graph. The code should assume `df` (the pandas DataFrame) is pre-loaded.
-    5.  The Python code should be a complete, executable script.
-    6.  **Crucially, the generated Python code MUST include `fig.write_html('templates/chart.html')` to save the chart.** This allows the application to display it.
-    7.  **Do NOT include `fig.show()` in the Python code**, as the chart display is handled by saving to HTML.
-    8.  Return the insights and the Python code as per the `ChartResponses` model.
-
-    If the request is unclear or cannot be fulfilled with the given data, return an `InvalidRequest` with an explanation.
-
-    Example of Python code structure:
-    ```python
-    import plotly.express as px
-    # df is assumed to be pre-loaded with the data
-
-    # Your plotting code here
-    # e.g., fig = px.bar(df, x='column_x', y='column_y', title='Your Chart Title')
-    fig.write_html('templates/chart.html') # Save the chart as chart.html in templates folder
-    ```
-
-    Once you generate the code, invoke the CodeGenerated tool. Then fill the'code_generated' field with the Python and it must be formatted as markdown.
-    """
 
 # %%
 # state = State(messages=["Build a bar chart to show the Total Sales by Genre"])
@@ -164,6 +129,41 @@ query_gen_system_template = """
 
 # %%
 def code_gen_node(state: State):
+    # Add a node for a model to generate a query based on the question and schema
+    query_gen_system_template = """
+        system: You are an AI assistant specialized in creating insightful graphs and generating Python code for them.
+        The data is already available in a pandas DataFrame named `df`.
+        DataFrame columns: {df_columns}
+        Sample of DataFrame (first 5 rows):
+        {df_head}
+
+        Your task:
+        1.  Analyze the user's request and the provided DataFrame.
+        2.  **Adhere to Chart Type Request:**
+            a.  The user's instruction (provided as `user_input` to this agent) may specify a preferred chart type (e.g., "generate a scatter plot", "show a bar graph").
+            b.  If a specific chart type is requested by the user and it is available in {chart_options} (e.g., 'Scatter', 'Line', 'Bar', etc.) and is appropriate for the data, **you MUST generate the Python code for that specific chart type.**
+            c.  If the user does not specify a chart type, or if the specified type is not in {chart_options} or is clearly unsuitable for the data, then you may choose the most fitting chart type from {chart_options}. In such cases, briefly explain your choice of chart type in the 'insights'.
+        3.  Generate valuable insights based on the data and the chosen chart.
+        4.  Produce concise and correct Python code (using `plotly.express`) to plot the graph. The code should assume `df` (the pandas DataFrame) is pre-loaded.
+        5.  The Python code should be a complete, executable script.
+        6.  **Crucially, the generated Python code MUST include `fig.write_html('templates/chart.html')` to save the chart.** This allows the application to display it.
+        7.  **Do NOT include `fig.show()` in the Python code**, as the chart display is handled by saving to HTML.
+        8.  Return the insights and the Python code as per the `ChartResponses` model.
+
+        If the request is unclear or cannot be fulfilled with the given data, return an `InvalidRequest` with an explanation.
+
+        Example of Python code structure:
+        ```python
+        import plotly.express as px
+        # df is assumed to be pre-loaded with the data
+
+        # Your plotting code here
+        # e.g., fig = px.bar(df, x='column_x', y='column_y', title='Your Chart Title')
+        fig.write_html('templates/chart.html') # Save the chart as chart.html in templates folder
+        ```
+
+        Once you generate the code, invoke the CodeGenerated tool. Then fill the'code_generated' field with the Python and it must be formatted as markdown.
+        """
     # Get the last tool message which contains the dataframe JSON
     tool_message = state["messages"][-1]
     df_json_content = tool_message.content
