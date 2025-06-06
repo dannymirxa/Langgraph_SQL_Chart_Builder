@@ -1,7 +1,7 @@
-from fallback_tool import create_tool_node_with_fallback
-from models import State, OPENAI_MODEL, Request, Response
-from dataframe import create_dataframe_pd_json
-from sql_operations import list_tables, describe_table, run_sql_query
+from fastapi_app.fallback_tool import create_tool_node_with_fallback
+from fastapi_app.models import State, OPENAI_MODEL, Request, Response
+from fastapi_app.dataframe import create_dataframe_pd_json
+from fastapi_app.sql_operations import list_tables, describe_table, run_sql_query
 
 from sqlalchemy import create_engine
 
@@ -381,8 +381,9 @@ async def main(request: Request) -> Response:
     #     draw_method=MermaidDrawMethod.PYPPETEER,
     # )
 
+    query_text = request.query if isinstance(request, Request) else request["query"]
     result = app.invoke(
-        {"messages": [("user", request["query"])]}
+        {"messages": [("user", query_text)]}
     )
 
     # print(result)
@@ -430,8 +431,8 @@ async def main(request: Request) -> Response:
 #     print("--Code Generated--")
 #     print(messages["code_generated"])
 
-import asyncio
+# import asyncio
 
-if __name__=="__main__":
-    request = {"query":"Find the total sales for each artist using bar chart"}
-    response = asyncio.run(main(request))
+# if __name__=="__main__":
+#     request = {"query":"Find the total sales for each artist using bar chart"}
+#     response = asyncio.run(main(request))
