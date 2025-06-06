@@ -1,74 +1,25 @@
-# %%
-from models import OPENAI_MODEL
-from app.sql_operations import list_tables, describe_table, run_sql_query
-from app.dataframe import create_dataframe_pd_json
+from fallback_tool import create_tool_node_with_fallback
+from models import State, OPENAI_MODEL, Request, Response
+from dataframe import create_dataframe_pd_json
 
-import pandas as pd
-import plotly.express as px
+from sqlalchemy import create_engine
+from sql_operations import list_tables, describe_table, run_sql_query
 
 from typing_extensions import Any, TypedDict, Optional, Annotated, Literal
-from sqlalchemy import create_engine
-
 from pydantic import BaseModel, Field
 from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.runnables import RunnableLambda, RunnableWithFallbacks
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
-from langgraph.prebuilt import ToolNode
+from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import START, StateGraph, END
 from langgraph.graph.message import AnyMessage, add_messages
 
+import pandas as pd
+import plotly.express as px
 import io, re
 from textwrap import dedent
 
-# Define the state for the agent
-class State(TypedDict):
-    messages: Annotated[list[AnyMessage], add_messages]
-    sql_query: Optional[str]
-    dataframe: Optional[Any]
-    code_generated: Optional[str]
-
-# %%
 engine = create_engine('postgresql+psycopg2://chinook:chinook@localhost:5433/chinook_auto_increment')
 
-# %% [markdown]
-# ### Creating Utility Functions
-# 
-# ##### 1. It allows the creation of tool nodes with built-in error handling.
-# ##### 2. If a tool execution fails, instead of crashing, it captures the error.
-# ##### 3. It then formats this error into a message that the agent can understand and act upon.
-# ##### 4. This allows the agent to attempt to correct its mistakes or try alternative approaches when a tool fails, making the overall system more resilient and capable of handling unexpected situations.
-
-# %%
-def create_tool_node_with_fallback(tools: list) -> RunnableWithFallbacks[Any, dict]:
-    """
-    Create a ToolNode with a fallback to handle errors and surface them to the agent.
-    """
-    return ToolNode(tools).with_fallbacks(
-        [RunnableLambda(handle_tool_error)], exception_key="error"
-    )
-
-
-def handle_tool_error(state) -> dict:
-    error = state.get("error")
-    tool_calls = state["messages"][-1].tool_calls
-    return {
-        "messages": [
-            ToolMessage(
-                content=f"Error: {repr(error)}\n please fix your mistakes.",
-                tool_call_id=tc["id"],
-            )
-            for tc in tool_calls
-        ]
-    }
-
-# %% [markdown]
-# ### Defining Tools for the Agent
-
-# %%
-# %%
-
-# Do not pass SQLAlchemyEngine here because it cannot be serialized as JSON schema
 @tool
 def list_tables_tool() -> str:
     """This tool lists all tables in the db in string representation of a list"""
@@ -84,9 +35,22 @@ def run_sql_query_tool(query: str = None):
     """This tool receives an sql query, runs it in the engine, and returns the result as a string"""
     return run_sql_query(engine, query)
 
-# %%
-# %% 
-## Create query checker function
+def first_tool_call(state: State) -> dict[str, list[AIMessage]]:
+    return {
+        "messages": [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "list_tables_tool",
+                        "args": {},
+                        "id": "tool_abcd123",
+                    }
+                ],
+            )
+        ]
+    }
+
 def _create_query_checker():
     query_check_system = """You are a SQL expert with a strong attention to detail.
                 Double check the Postgres query for common mistakes, including:
@@ -112,7 +76,6 @@ def _create_query_checker():
 
     return query_check
 
-# %%
 def model_check_query(state: State) -> dict[str, Any]:
     """
     Use this tool to double-check if your query is correct before executing it.
@@ -127,53 +90,11 @@ def model_check_query(state: State) -> dict[str, Any]:
                 break
     return {"messages": [message], "sql_query": sql_query}
 
-# %%
-# Add a node for the first tool call
-# retun messages because it is an object in the state
-def first_tool_call(state: State) -> dict[str, list[AIMessage]]:
-    return {
-        "messages": [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {
-                        "name": "list_tables_tool",
-                        "args": {},
-                        "id": "tool_abcd123",
-                    }
-                ],
-            )
-        ]
-    }
-
-# %%
-# Define a new graph
-workflow = StateGraph(State)
-
-# %%
-workflow.add_node("first_tool_call", first_tool_call)
-
-# Add nodes for the first two tools
-workflow.add_node("list_tables_tool", create_tool_node_with_fallback([list_tables_tool]))
-workflow.add_node("describe_table_tool", create_tool_node_with_fallback([describe_table_tool]))
-
-# Add a node for a model to choose the relevant tables based on the question and available tables
-model_get_schema = OPENAI_MODEL.bind_tools([describe_table_tool])
-workflow.add_node(
-                "model_get_schema",
-                lambda state: {
-                    "messages": [model_get_schema.invoke(state["messages"])],
-                },
-                )
-
-# %%
-# Describe a tool to represent the end state
 class SubmitFinalAnswer(BaseModel):
     """Submit the final answer to the user based on the query results."""
     final_answer: str = Field(..., description="The final answer to the user")
     sql_query: Optional[str] = Field(None, description="The SQL query that was executed to get the answer")
 
-# %% 
 # Add a node for a model to generate a query based on the question and schema
 
 def _create_query_generator():    
@@ -207,7 +128,6 @@ def _create_query_generator():
         ))
     return query_gen
 
-# %%
 def query_gen_node(state: State):
     query_gen = _create_query_generator()
     message = query_gen.invoke(state)
@@ -230,31 +150,6 @@ def query_gen_node(state: State):
     else:
         tool_messages = []
     return {"messages": [message] + tool_messages}
-
-# %%
-
-workflow.add_node("query_gen", query_gen_node)
-
-# Add a node for the model to check the query before executing it
-workflow.add_node("correct_query", model_check_query)
-
-# Add node for executing the query
-workflow.add_node("execute_query", create_tool_node_with_fallback([run_sql_query_tool]))
-
-# %%
-# Define a conditional edge to decide whether to continue or end the workflow
-def should_continue(state: State) -> Literal["correct_query", "query_gen"]:
-    messages = state["messages"]
-    last_message = messages[-1]
-    # If there is a tool call, then we finish
-    # if getattr(last_message, "tool_calls", None):
-    #     return "end"
-    if last_message.content.startswith("Error:"):
-        return "query_gen"
-    else:
-        return "correct_query"
-    
-# %%
     
 def create_dataframe_call(state: State) -> dict[str, Any]:
     sql_query = state.get("sql_query")
@@ -275,7 +170,6 @@ def create_dataframe_call(state: State) -> dict[str, Any]:
     else:
         return {"messages": [AIMessage(content="Error: SQL query not found in state to create dataframe.")]}
 
-# %%
 class CodeGenerated(BaseModel):
     """Submit the code generated to the user based on the query results."""
     code_generated: Optional[str] = Field(..., description="Plotly code generated for the user")
@@ -358,7 +252,6 @@ def code_gen_node(state: State):
             )
     return {"messages": messages, "code_generated": code_generated, "dataframe": df_from_tool}
 
-# %%
 def execute_code_node(state: State):
     # print(state["code_generated"])
     code_blocks = re.findall(r"```python\n(.*?)```", state["code_generated"], re.DOTALL)
@@ -373,7 +266,18 @@ def execute_code_node(state: State):
     except Exception as e:
         print(e)
     return state
-# %%
+
+# Define a conditional edge to decide whether to continue or end the workflow
+def should_continue(state: State) -> Literal["correct_query", "query_gen"]:
+    messages = state["messages"]
+    last_message = messages[-1]
+    # If there is a tool call, then we finish
+    # if getattr(last_message, "tool_calls", None):
+    #     return "end"
+    if last_message.content.startswith("Error:"):
+        return "query_gen"
+    else:
+        return "correct_query"
 
 # Define a new conditional edge to decide whether to generate dataframe or continue query gen
 def should_proceed_to_dataframe(state: State) -> Literal["generate_dataframe", "continue_query_gen"]:
@@ -398,91 +302,136 @@ def should_proceed_to_code_gen(state: State) -> Literal["working_dataframe", "fa
     else:
         return "working_dataframe"
 
-# Specify the edges between the nodes
-# workflow.add_edge(START, "first_tool_call")
-workflow.add_node("create_dataframe_node", create_dataframe_call)
-workflow.add_node("code_gen", code_gen_node) # Node to generate the tool call
-workflow.add_node("execute_code", execute_code_node) # Node to execute the code
+def define_graph():
+    # Define a new graph
+    workflow = StateGraph(State)
+    workflow.add_node("first_tool_call", first_tool_call)
 
-workflow.add_edge("first_tool_call", "list_tables_tool")
-workflow.add_edge("list_tables_tool", "model_get_schema")
-workflow.add_edge("model_get_schema", "describe_table_tool")
-workflow.add_edge("describe_table_tool", "query_gen")
-workflow.add_conditional_edges(
-    "query_gen",
-    should_continue,
-    { "correct_query": "correct_query", "query_gen": "query_gen"}
-)
-workflow.add_edge("correct_query", "execute_query")
-workflow.add_conditional_edges( # Modify the edge from execute_query
-    "execute_query",
-    should_proceed_to_dataframe,
-    {
-        "generate_dataframe": "create_dataframe_node", # Transition to the node that generates the tool call
-        "continue_query_gen": "query_gen"
-    }
-)
-workflow.add_conditional_edges(
-    "create_dataframe_node",
-    should_proceed_to_code_gen,
-    {
-        "working_dataframe": "code_gen",
-        "failed_dataframe": "query_gen"
-    }
-)
+    # Add nodes for the first two tools
+    workflow.add_node("list_tables_tool", create_tool_node_with_fallback([list_tables_tool]))
+    workflow.add_node("describe_table_tool", create_tool_node_with_fallback([describe_table_tool]))
 
-workflow.add_edge("code_gen", "execute_code")
-workflow.add_edge("execute_code", END)
-workflow.set_entry_point("first_tool_call")
+    # Add a node for a model to choose the relevant tables based on the question and available tables
+    model_get_schema = OPENAI_MODEL.bind_tools([describe_table_tool])
+    workflow.add_node(
+                    "model_get_schema",
+                    lambda state: {
+                        "messages": [model_get_schema.invoke(state["messages"])],
+                    },
+                    )
+    workflow.add_node("query_gen", query_gen_node)
 
-# Compile the workflow into a runnable
-app = workflow.compile()
+    # Add a node for the model to check the query before executing it
+    workflow.add_node("correct_query", model_check_query)
 
-# %% [markdown]
-# ### Visualizing the Graph
-
-# %%
-from IPython.display import Image, display
-from langchain_core.runnables.graph import MermaidDrawMethod
-
-graph_png = app.get_graph().draw_mermaid_png(
-    draw_method=MermaidDrawMethod.PYPPETEER,
-)
-
-with open("graph.png", "wb") as f:
-    f.write(graph_png)
-
-display(Image(graph_png))
-
-# %% [markdown]
-# ### Running the Agent
-
-# %%
-messages = app.invoke(
-    {"messages": [("user", "Total number of albums for each artist with pop genre")]}
-)
-
-# %%
-print("--Latest Message--")
-print(messages["messages"][-1].content)
-print("--SQL Query--")
-print(messages["sql_query"])
-print("--Latest Message--")
-print(messages["dataframe"])
-print("--Code Generated--")
-print(messages["code_generated"])
+    # Add node for executing the query
+    workflow.add_node("execute_query", create_tool_node_with_fallback([run_sql_query_tool]))
 
 
-# # %%
-# messages["messages"][-1].tool_calls[0]["args"]
+    # Specify the edges between the nodes
+    # workflow.add_edge(START, "first_tool_call")
+    workflow.add_node("create_dataframe_node", create_dataframe_call)
+    workflow.add_node("code_gen", code_gen_node) # Node to generate the tool call
+    workflow.add_node("execute_code", execute_code_node) # Node to execute the code
 
-# # %%
-# for event in app.stream(
-#     {"messages": [("user", "Total number of artist in the db?")]}
-# ):
-#     print(event)
+    workflow.add_edge("first_tool_call", "list_tables_tool")
+    workflow.add_edge("list_tables_tool", "model_get_schema")
+    workflow.add_edge("model_get_schema", "describe_table_tool")
+    workflow.add_edge("describe_table_tool", "query_gen")
+    workflow.add_conditional_edges(
+        "query_gen",
+        should_continue,
+        { "correct_query": "correct_query", "query_gen": "query_gen"}
+    )
+    workflow.add_edge("correct_query", "execute_query")
+    workflow.add_conditional_edges( # Modify the edge from execute_query
+        "execute_query",
+        should_proceed_to_dataframe,
+        {
+            "generate_dataframe": "create_dataframe_node", # Transition to the node that generates the tool call
+            "continue_query_gen": "query_gen"
+        }
+    )
+    workflow.add_conditional_edges(
+        "create_dataframe_node",
+        should_proceed_to_code_gen,
+        {
+            "working_dataframe": "code_gen",
+            "failed_dataframe": "query_gen"
+        }
+    )
 
-# # %%
+    workflow.add_edge("code_gen", "execute_code")
+    workflow.add_edge("execute_code", END)
+    workflow.set_entry_point("first_tool_call")
 
+    # Compile the workflow into a runnable
+    app = workflow.compile()
 
+    return app
 
+async def main(request: Request) -> Response:
+
+    app = define_graph()
+
+    # from IPython.display import Image, display
+    # from langchain_core.runnables.graph import MermaidDrawMethod
+
+    # graph_png = app.get_graph().draw_mermaid_png(
+    #     draw_method=MermaidDrawMethod.PYPPETEER,
+    # )
+
+    result = app.invoke(
+        {"messages": [("user", request.query)]}
+    )
+
+    # print(result)
+    return Response(
+        messages=result["messages"],
+        sql_query=result.get("sql_query"),
+        dataframe=result.get("dataframe"),
+        code_generated=result.get("code_generated")
+    )
+
+    # print("--Latest Message--")
+    # print(messages["messages"][-1].content)
+    # print("--SQL Query--")
+    # print(messages["sql_query"])
+    # print("--Latest Message--")
+    # print(messages["dataframe"])
+    # print("--Code Generated--")
+    # print(messages["code_generated"])
+
+# def main(user_message: str):
+#     app = define_graph()
+
+#     # from IPython.display import Image, display
+#     # from langchain_core.runnables.graph import MermaidDrawMethod
+
+#     # graph_png = app.get_graph().draw_mermaid_png(
+#     #     draw_method=MermaidDrawMethod.PYPPETEER,
+#     # )
+
+#     with open("graph.png", "wb") as f:
+#         f.write(graph_png)
+
+#     display(Image(graph_png))
+
+#     messages = app.invoke(
+#         {"messages": [("user", user_message)]}
+#     )
+
+#     print("--Latest Message--")
+#     print(messages["messages"][-1].content)
+#     print("--SQL Query--")
+#     print(messages["sql_query"])
+#     print("--Latest Message--")
+#     print(messages["dataframe"])
+#     print("--Code Generated--")
+#     print(messages["code_generated"])
+
+# import asyncio
+
+# if __name__=="__main__":
+#     request = Request(query="Total number of albums for each artist with pop genre")
+#     response = asyncio.run(main(request))
