@@ -1,7 +1,9 @@
 # %%
 from models import OPENAI_MODEL
 from sql_operations import list_tables, describe_table, run_sql_query
+from dataframe import create_dataframe_pd_json
 
+import pandas as pd
 from sqlalchemy import create_engine
 from langchain_community.utilities.sql_database import SQLDatabase
 
@@ -21,12 +23,15 @@ from typing_extensions import TypedDict
 
 from langgraph.graph import END, StateGraph, START
 from langgraph.graph.message import AnyMessage, add_messages
+import uuid, io
 
 
 # Define the state for the agent
 class State(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
     sql_query: Optional[str]
+    dataframe: Optional[Any]
+    code_generated: Optional[str]
 
 
 # %%
@@ -69,31 +74,10 @@ def handle_tool_error(state) -> dict:
 # ### Defining Tools for the Agent
 
 # %%
-from langchain_community.agent_toolkits import SQLDatabaseToolkit
 from langchain_core.tools import tool
-
 # %%
-# toolkit = SQLDatabaseToolkit(db=db, llm=OPENAI_MODEL)
-# tools = toolkit.get_tools()
 
-# list_tables_tool = next(tool for tool in tools if tool.name == "sql_db_list_tables")
-# get_schema_tool = next(tool for tool in tools if tool.name == "sql_db_schema")
-
-
-# %%
-# print(list_tables_tool.run({}).split(','))
-# print(type(list_tables_tool.run({})))
-
-# %%
-# print([get_schema_tool.run({"table_names": table}) for table in list_tables_tool.run({}).split(',')])
-# type(get_schema_tool.run({"table_names": "artist"}))
-
-# %% [markdown]
-# ### DIY Tools
-
-# %%
 # Do not pass SQLAlchemyEngine here because it cannot be serialized as JSON schema
-
 @tool
 def list_tables_tool() -> str:
     """This tool lists all tables in the db in string representation of a list"""
@@ -108,21 +92,6 @@ def describe_table_tool(table_name: str = None) -> str:
 def run_sql_query_tool(query: str = None):
     """This tool receives an sql query, runs it in the engine, and returns the result as a string"""
     return run_sql_query(engine, query)
-
-# %%
-# run_sql_query(engine, 'SELECT COUNT(artist_id) AS total_artists FROM artist;')
-
-# %%
-# type(list_tables_tool(engine=engine))
-
-# %%
-# type(describe_table_tool(table_name= 'employee'))
-
-# %%
-# type(run_sql_query_tool(query="SELECT * FROM artist;"))
-
-# %% [markdown]
-# ### Implementing Query Checking
 
 # %%
 from langchain_core.prompts import ChatPromptTemplate
@@ -168,8 +137,6 @@ def model_check_query(state: State) -> dict[str, Any]:
                 sql_query = tc["args"]["query"]
                 break
     return {"messages": [message], "sql_query": sql_query}
-
-
 
 # %%
 # Add a node for the first tool call
@@ -275,6 +242,8 @@ def query_gen_node(state: State):
         tool_messages = []
     return {"messages": [message] + tool_messages}
 
+# %%
+
 workflow.add_node("query_gen", query_gen_node)
 
 # Add a node for the model to check the query before executing it
@@ -295,10 +264,46 @@ def should_continue(state: State) -> Literal["end", "correct_query", "query_gen"
         return "query_gen"
     else:
         return "correct_query"
+    
+# %%
+    
+def create_dataframe_call(state: State) -> dict[str, Any]:
+    sql_query = state.get("sql_query")
+    if sql_query:
+        try:
+            dataframe_json_str = create_dataframe_pd_json(engine, sql_query)
+            df = pd.read_json(io.StringIO(dataframe_json_str))
+            return {"dataframe": df}
+        except Exception as e:
+            return {
+                "messages": [
+                    AIMessage(
+                        content=f"Error creating dataframe: {repr(e)}\n Please fix the SQL query or data issue.",
+                        tool_calls=[],
+                    )
+                ]
+            }
+    else:
+        return {"messages": [AIMessage(content="Error: SQL query not found in state to create dataframe.")]}
 
+
+# %%
+
+# Define a new conditional edge to decide whether to generate dataframe or continue query gen
+def should_proceed_to_dataframe(state: State) -> Literal["generate_dataframe", "continue_query_gen"]:
+    # This is a simplified logic. In a real application, you'd have a more robust way
+    # to determine if a dataframe is needed (e.g., based on user's initial intent).
+    # For this task, we assume if a SQL query was successfully executed, we proceed to dataframe generation.
+    messages = state["messages"]
+    last_message = messages[-1]
+    # Check if the last message is a ToolMessage and if sql_query is present in the state
+    if state.get("sql_query") and isinstance(last_message, ToolMessage) and last_message.tool_call_id:
+        return "generate_dataframe"
+    return "continue_query_gen"
 
 # Specify the edges between the nodes
 # workflow.add_edge(START, "first_tool_call")
+workflow.add_node("create_dataframe_node", create_dataframe_call) # Node to generate the tool call
 workflow.add_edge("first_tool_call", "list_tables_tool")
 workflow.add_edge("list_tables_tool", "model_get_schema")
 workflow.add_edge("model_get_schema", "describe_table_tool")
@@ -309,7 +314,15 @@ workflow.add_conditional_edges(
     { "correct_query": "correct_query", "query_gen": "query_gen", "end": END}
 )
 workflow.add_edge("correct_query", "execute_query")
-workflow.add_edge("execute_query", "query_gen")
+workflow.add_conditional_edges( # Modify the edge from execute_query
+    "execute_query",
+    should_proceed_to_dataframe,
+    {
+        "generate_dataframe": "create_dataframe_node", # Transition to the node that generates the tool call
+        "continue_query_gen": "query_gen"
+    }
+)
+workflow.add_edge("create_dataframe_node", END) # After executing the dataframe tool, end for now
 workflow.set_entry_point("first_tool_call")
 
 # Compile the workflow into a runnable
@@ -337,7 +350,14 @@ display(
 messages = app.invoke(
     {"messages": [("user", "Total number of albums for each artist with pop genre")]}
 )
-json_str = messages["messages"][-1].tool_calls[0]["args"]["final_answer"]
+
+# %%
+print("--Latest Message--")
+print(messages["messages"][-1].content)
+print("--SQL Query--")
+print(messages["sql_query"])
+print("--Latest Message--")
+print(messages["dataframe"])
 
 # %%
 messages["messages"][-1].tool_calls[0]["args"]
