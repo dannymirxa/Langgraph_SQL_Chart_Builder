@@ -83,11 +83,19 @@ def model_check_query(state: State) -> dict[str, Any]:
     query_check = _create_query_checker()
     message = query_check.invoke({"messages": [state["messages"][-1]]})
     sql_query = None
+    tool_messages = []
     if message.tool_calls:
         for tc in message.tool_calls:
+                # Add the stored SQL query to the arguments of SubmitFinalAnswer
             if tc["name"] == "run_sql_query_tool" and "query" in tc["args"]:
                 sql_query = tc["args"]["query"]
-                break
+            else:
+                tool_messages.append(
+                    ToolMessage(
+                        content=f"Error: The wrong tool was called: {tc['name']}. Please fix your mistakes. Remember to only call run_sql_query_tool to submit the final answer. Generated queries should be outputted WITHOUT a tool call.", 
+                        tool_call_id=tc["id"],
+                    )
+                )
     return {"messages": [message], "sql_query": sql_query}
 
 class SubmitFinalAnswer(BaseModel):
@@ -302,77 +310,77 @@ def should_proceed_to_code_gen(state: State) -> Literal["working_dataframe", "fa
     else:
         return "working_dataframe"
 
-def define_graph():
+# def define_graph():
     # Define a new graph
-    workflow = StateGraph(State)
-    workflow.add_node("first_tool_call", first_tool_call)
+workflow = StateGraph(State)
+workflow.add_node("first_tool_call", first_tool_call)
 
-    # Add nodes for the first two tools
-    workflow.add_node("list_tables_tool", create_tool_node_with_fallback([list_tables_tool]))
-    workflow.add_node("describe_table_tool", create_tool_node_with_fallback([describe_table_tool]))
+# Add nodes for the first two tools
+workflow.add_node("list_tables_tool", create_tool_node_with_fallback([list_tables_tool]))
+workflow.add_node("describe_table_tool", create_tool_node_with_fallback([describe_table_tool]))
 
-    # Add a node for a model to choose the relevant tables based on the question and available tables
-    model_get_schema = OPENAI_MODEL.bind_tools([describe_table_tool])
-    workflow.add_node(
-                    "model_get_schema",
-                    lambda state: {
-                        "messages": [model_get_schema.invoke(state["messages"])],
-                    },
-                    )
-    workflow.add_node("query_gen", query_gen_node)
+# Add a node for a model to choose the relevant tables based on the question and available tables
+model_get_schema = OPENAI_MODEL.bind_tools([describe_table_tool])
+workflow.add_node(
+                "model_get_schema",
+                lambda state: {
+                    "messages": [model_get_schema.invoke(state["messages"])],
+                },
+                )
+workflow.add_node("query_gen", query_gen_node)
 
-    # Add a node for the model to check the query before executing it
-    workflow.add_node("correct_query", model_check_query)
+# Add a node for the model to check the query before executing it
+workflow.add_node("correct_query", model_check_query)
 
-    # Add node for executing the query
-    workflow.add_node("execute_query", create_tool_node_with_fallback([run_sql_query_tool]))
+# Add node for executing the query
+workflow.add_node("execute_query", create_tool_node_with_fallback([run_sql_query_tool]))
 
 
-    # Specify the edges between the nodes
-    # workflow.add_edge(START, "first_tool_call")
-    workflow.add_node("create_dataframe_node", create_dataframe_call)
-    workflow.add_node("code_gen", code_gen_node) # Node to generate the tool call
-    workflow.add_node("execute_code", execute_code_node) # Node to execute the code
+# Specify the edges between the nodes
+# workflow.add_edge(START, "first_tool_call")
+workflow.add_node("create_dataframe_node", create_dataframe_call)
+workflow.add_node("code_gen", code_gen_node) # Node to generate the tool call
+workflow.add_node("execute_code", execute_code_node) # Node to execute the code
 
-    workflow.add_edge("first_tool_call", "list_tables_tool")
-    workflow.add_edge("list_tables_tool", "model_get_schema")
-    workflow.add_edge("model_get_schema", "describe_table_tool")
-    workflow.add_edge("describe_table_tool", "query_gen")
-    workflow.add_conditional_edges(
-        "query_gen",
-        should_continue,
-        { "correct_query": "correct_query", "query_gen": "query_gen"}
-    )
-    workflow.add_edge("correct_query", "execute_query")
-    workflow.add_conditional_edges( # Modify the edge from execute_query
-        "execute_query",
-        should_proceed_to_dataframe,
-        {
-            "generate_dataframe": "create_dataframe_node", # Transition to the node that generates the tool call
-            "continue_query_gen": "query_gen"
-        }
-    )
-    workflow.add_conditional_edges(
-        "create_dataframe_node",
-        should_proceed_to_code_gen,
-        {
-            "working_dataframe": "code_gen",
-            "failed_dataframe": "query_gen"
-        }
-    )
+workflow.add_edge("first_tool_call", "list_tables_tool")
+workflow.add_edge("list_tables_tool", "model_get_schema")
+workflow.add_edge("model_get_schema", "describe_table_tool")
+workflow.add_edge("describe_table_tool", "query_gen")
+workflow.add_conditional_edges(
+    "query_gen",
+    should_continue,
+    { "correct_query": "correct_query", "query_gen": "query_gen"}
+)
+workflow.add_edge("correct_query", "execute_query")
+workflow.add_conditional_edges( # Modify the edge from execute_query
+    "execute_query",
+    should_proceed_to_dataframe,
+    {
+        "generate_dataframe": "create_dataframe_node", # Transition to the node that generates the tool call
+        "continue_query_gen": "query_gen"
+    }
+)
+workflow.add_conditional_edges(
+    "create_dataframe_node",
+    should_proceed_to_code_gen,
+    {
+        "working_dataframe": "code_gen",
+        "failed_dataframe": "query_gen"
+    }
+)
 
-    workflow.add_edge("code_gen", "execute_code")
-    workflow.add_edge("execute_code", END)
-    workflow.set_entry_point("first_tool_call")
+workflow.add_edge("code_gen", "execute_code")
+workflow.add_edge("execute_code", END)
+workflow.set_entry_point("first_tool_call")
 
-    # Compile the workflow into a runnable
-    app = workflow.compile()
+# Compile the workflow into a runnable
+app = workflow.compile()
 
-    return app
+    # return app
 
 async def main(request: Request) -> Response:
 
-    app = define_graph()
+    # app = define_graph()
 
     # from IPython.display import Image, display
     # from langchain_core.runnables.graph import MermaidDrawMethod
@@ -431,8 +439,8 @@ async def main(request: Request) -> Response:
 #     print("--Code Generated--")
 #     print(messages["code_generated"])
 
-# import asyncio
+import asyncio
 
-# if __name__=="__main__":
-#     request = {"query":"Find the total sales for each artist using bar chart"}
-#     response = asyncio.run(main(request))
+if __name__=="__main__":
+    request = {"query":"Find the total sales for each artist using bar chart"}
+    response = asyncio.run(main(request))

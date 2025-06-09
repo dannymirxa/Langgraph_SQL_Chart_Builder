@@ -1,0 +1,7 @@
+{
+  "dependencies": ["./fastapi_app"],
+  "graphs": {
+    "agent": "./fastapi_app/service.py:workflow"
+  },
+  "env": ".env"
+}
